@@ -1,8 +1,6 @@
 import express from 'express';
 import dotenv from 'dotenv';
 import cors from 'cors';
-import cookieParser from 'cookie-parser';
-import path from 'path';
 import connectDB from './config/db.js';
 import './config/cloudinary.js';
 
@@ -14,8 +12,6 @@ import recommendationRoutes from './routes/recommendationRoutes.js';
 
 // Load environment variables
 dotenv.config();
-
-const __dirname = path.resolve();
 
 // Initialize Express app
 const app = express();
@@ -29,7 +25,6 @@ app.use(cors({
   credentials: true,
 }));
 
-app.use(cookieParser());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -54,16 +49,7 @@ app.use('/api/songs', songRoutes);
 app.use('/api/playlists', playlistRoutes);
 app.use('/api/recommendations', recommendationRoutes);
 
-// Serve frontend in production
-if (process.env.NODE_ENV === 'production') {
-  app.use(express.static(path.join(__dirname, '../frontend/dist')));
-
-  app.get('*', (_, res) => {
-    res.sendFile(path.join(__dirname, '../frontend', 'dist', 'index.html'));
-  });
-}
-
-// 404 handler (only reached in development since * is caught above in prod)
+// 404 handler
 app.use((req, res) => {
   res.status(404).json({
     success: false,
@@ -98,6 +84,7 @@ app.listen(PORT, () => {
 // Handle unhandled promise rejections
 process.on('unhandledRejection', (err) => {
   console.error('❌ Unhandled Rejection:', err);
+  // Close server & exit process
   process.exit(1);
 });
 
