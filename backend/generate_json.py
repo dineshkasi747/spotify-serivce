@@ -1,148 +1,200 @@
 import os
 import json
-import pandas as pd
 import re
 import requests
+import base64
+import time
+from urllib.parse import quote
 
-# ====== CONFIG ======
+# ================= CONFIG =================
+
+SPOTIFY_CLIENT_ID = "3a8b25a51d284faabe4fc09e957028a8"
+SPOTIFY_CLIENT_SECRET = "a1f0b249b3344b34871105021c5b7fbb"
+
 MP3_FOLDER = r"music-files"
-DATASET_CSV = r"songs_dataset.csv"
 OUTPUT_JSON = "songs.json"
 
-# ====== LOAD DATASET ======
-df = pd.read_csv(DATASET_CSV)
+# ================= GET SPOTIFY TOKEN =================
 
-if "Unnamed: 0" in df.columns:
-    df = df.drop(columns=["Unnamed: 0"])
+def get_spotify_token():
+    auth_string = f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}"
+    auth_bytes = auth_string.encode("utf-8")
+    auth_base64 = base64.b64encode(auth_bytes).decode("utf-8")
 
-df["track_name"] = df["track_name"].str.lower().str.strip()
+    url = "https://accounts.spotify.com/api/token"
+    headers = {
+        "Authorization": f"Basic {auth_base64}",
+        "Content-Type": "application/x-www-form-urlencoded"
+    }
+    data = {"grant_type": "client_credentials"}
 
-feature_columns = [
-    "danceability", "energy", "acousticness",
-    "instrumentalness", "valence", "tempo",
-    "loudness", "speechiness", "liveness"
-]
+    response = requests.post(url, headers=headers, data=data)
 
-# ====== CLEAN TITLE ======
+    if response.status_code != 200:
+        print("❌ Failed to get Spotify token")
+        print(response.text)
+        exit()
+
+    return response.json()["access_token"]
+
+
+# ================= CLEAN FILENAME =================
 
 def clean_filename(filename):
     name = os.path.splitext(filename)[0]
 
-    # remove website junk completely
+    # Remove junk text
     name = re.sub(r"spotdown\.org", "", name, flags=re.IGNORECASE)
-    name = re.sub(r"spotdown", "", name, flags=re.IGNORECASE)
-
-    # remove .org or any domain leftovers
-    name = re.sub(r"\.org", "", name, flags=re.IGNORECASE)
-
-    # remove brackets content
     name = re.sub(r"\(.*?\)", "", name)
-
-    # remove extra dashes at end
-    name = re.sub(r"-\s*$", "", name)
-
-    # replace underscores
     name = name.replace("_", " ")
-
-    # remove extra spaces
     name = re.sub(r"\s+", " ", name).strip()
 
     return name
 
 
-# ====== GET REAL SONG DATA FROM ITUNES ======
+# ================= SAFE SPOTIFY REQUEST =================
 
-def fetch_song_data(title):
+def safe_request(url, token):
+    headers = {"Authorization": f"Bearer {token}"}
+    response = requests.get(url, headers=headers)
+
+    # Handle rate limiting
+    if response.status_code == 429:
+        retry_after = int(response.headers.get("Retry-After", 2))
+        print(f"⏳ Rate limited. Waiting {retry_after} seconds...")
+        time.sleep(retry_after)
+        return safe_request(url, token)
+
+    if response.status_code != 200:
+        print(f"❌ Spotify API Error {response.status_code}")
+        print(response.text)
+        return None
+
     try:
-        query = title.replace(" ", "+")
-        url = f"https://itunes.apple.com/search?term={query}&entity=song&limit=1"
-
-        response = requests.get(url, timeout=5)
-        data = response.json()
-
-        if data.get("resultCount", 0) > 0:
-            result = data["results"][0]
-
-            return {
-                "title": result.get("trackName", title),
-                "artist": result.get("artistName", "Unknown Artist"),
-                "album": result.get("collectionName", "Unknown"),
-                "imageUrl": result.get("artworkUrl100", "").replace("100x100", "600x600")
-            }
+        return response.json()
     except:
-        pass
+        print("⚠ Invalid JSON received")
+        return None
+
+
+# ================= SEARCH SONG =================
+
+def search_song(title, token):
+    query = quote(title)
+    url = f"https://api.spotify.com/v1/search?q={query}&type=track&limit=1"
+
+    data = safe_request(url, token)
+
+    if not data or not data.get("tracks") or not data["tracks"]["items"]:
+        return None
+
+    track = data["tracks"]["items"][0]
+
+    image_url = ""
+    if track["album"]["images"]:
+        image_url = track["album"]["images"][0]["url"]
 
     return {
-        "title": title,
-        "artist": "Unknown Artist",
-        "album": "Unknown",
-        "imageUrl": "https://via.placeholder.com/600"
+        "track_id": track["id"],
+        "title": track["name"],
+        "artist": track["artists"][0]["name"],
+        "album": track["album"]["name"],
+        "imageUrl": image_url,
+        "releaseYear": track["album"]["release_date"][:4] if track["album"].get("release_date") else None,
+        "duration": track["duration_ms"]
     }
 
 
-# ====== MATCH DATASET FEATURES ======
+# ================= GET AUDIO FEATURES =================
 
+def get_audio_features(track_id, token):
+    url = f"https://api.spotify.com/v1/audio-features/{track_id}"
+    data = safe_request(url, token)
 
-def get_features(title):
-    match = df[df["track_name"] == title.lower()]
-
-    # ✅ If exact match found
-    if not match.empty:
-        row = match.iloc[0]
-    else:
-        # 🔥 If no match → randomly pick a row
-        row = df.sample(n=1).iloc[0]
-
-    return {
-        "genre": row["track_genre"],
-        "features": {
-            col: float(row[col]) for col in feature_columns
+    if not data:
+        return {
+            "danceability": 0.5,
+            "energy": 0.5,
+            "acousticness": 0.5,
+            "instrumentalness": 0.0,
+            "valence": 0.5,
+            "tempo": 120,
+            "speechiness": 0.05,
+            "liveness": 0.1,
+            "loudness": -10,
         }
+
+    return {
+        "danceability": data.get("danceability", 0.5),
+        "energy": data.get("energy", 0.5),
+        "acousticness": data.get("acousticness", 0.5),
+        "instrumentalness": data.get("instrumentalness", 0.0),
+        "valence": data.get("valence", 0.5),
+        "tempo": data.get("tempo", 120),
+        "speechiness": data.get("speechiness", 0.05),
+        "liveness": data.get("liveness", 0.1),
+        "loudness": data.get("loudness", -10),
     }
 
 
-# ====== MAIN ======
+# ================= MAIN =================
 
-songs_json = []
-used_titles = set()
+def generate_json():
+    token = get_spotify_token()
+    print("✅ Spotify Token Generated\n")
 
-mp3_files = [f for f in os.listdir(MP3_FOLDER) if f.endswith(".mp3")]
+    songs_json = []
+    used_titles = set()
 
-for file in mp3_files:
+    if not os.path.exists(MP3_FOLDER):
+        print("❌ music-files folder not found")
+        return
 
-    cleaned_title = clean_filename(file)
+    mp3_files = [f for f in os.listdir(MP3_FOLDER) if f.endswith(".mp3")]
 
-    if cleaned_title.lower() in used_titles:
-        continue
+    for file in mp3_files:
+        cleaned_title = clean_filename(file)
 
-    used_titles.add(cleaned_title.lower())
+        if cleaned_title.lower() in used_titles:
+            continue
 
-    print(f"Processing: {cleaned_title}")
+        used_titles.add(cleaned_title.lower())
 
-    # 🔥 Get correct title + artist + album + image
-    api_data = fetch_song_data(cleaned_title)
+        print(f"🎵 Processing: {cleaned_title}")
 
-    # 🎵 Get dataset features
-    dataset_data = get_features(api_data["title"])
+        song_meta = search_song(cleaned_title, token)
 
-    song_data = {
-        "title": api_data["title"],
-        "artist": api_data["artist"],
-        "album": api_data["album"],
-        "genre": dataset_data["genre"],
-        "duration_ms": None,
-        "explicit": False,
-        "imageUrl": api_data["imageUrl"],
-        "fileName": file,
-        "features": dataset_data["features"]
-    }
+        if not song_meta:
+            print("❌ Not found on Spotify\n")
+            continue
 
-    songs_json.append(song_data)
+        features = get_audio_features(song_meta["track_id"], token)
+
+        song_data = {
+            "track_id": song_meta["track_id"],
+            "title": song_meta["title"],
+            "artist": song_meta["artist"],
+            "album": song_meta["album"],
+            "genre": "",
+            "duration": song_meta["duration"],
+            "releaseYear": song_meta["releaseYear"],
+            "imageUrl": song_meta["imageUrl"],
+            "fileName": file,
+            "features": features
+        }
+
+        songs_json.append(song_data)
+        print("✅ Added\n")
+
+        # small delay to avoid rate limit
+        time.sleep(0.3)
+
+    with open(OUTPUT_JSON, "w", encoding="utf-8") as f:
+        json.dump(songs_json, f, indent=4, ensure_ascii=False)
+
+    print("\n🎉 songs.json created successfully!")
 
 
-# ====== SAVE JSON ======
+# ================= RUN =================
 
-with open(OUTPUT_JSON, "w", encoding="utf-8") as f:
-    json.dump(songs_json, f, indent=4, ensure_ascii=False)
-
-print("\n✅ Perfect Clean songs.json Created Successfully")
+generate_json()
