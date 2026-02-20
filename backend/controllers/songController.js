@@ -452,3 +452,120 @@ export const deleteSong = async (req, res) => {
     });
   }
 };
+
+// ================================================================
+// ADD THIS TO THE BOTTOM OF YOUR songController.js
+// Also run: npm install node-fetch
+// Add to .env: MUSIXMATCH_API_KEY=your_key_here
+// Free key at: https://developer.musixmatch.com/signup
+// ================================================================
+
+// @desc    Get synced lyrics for a song via Musixmatch
+// @route   GET /api/songs/:id/lyrics
+// @access  Public
+// ================================================================
+// ADD THIS TO THE BOTTOM OF YOUR songController.js
+// Uses lrclib.net — completely FREE, no API key, no signup needed
+// Supports synced (timestamped) lyrics!
+// ================================================================
+
+// @desc    Get synced lyrics for a song via lrclib.net (free, no key needed)
+// @route   GET /api/songs/:id/lyrics
+// @access  Public
+export const getSongLyrics = async (req, res) => {
+  try {
+    const song = await Song.findById(req.params.id);
+    if (!song) {
+      return res.status(404).json({ success: false, message: 'Song not found' });
+    }
+
+    const title    = encodeURIComponent(song.title);
+    const artist   = encodeURIComponent(song.artist);
+    const album    = encodeURIComponent(song.album || '');
+    const duration = song.duration || 0;
+
+    // lrclib.net — free, no API key required
+    // Try exact match first (with duration for accuracy)
+    let url = `https://lrclib.net/api/get?artist_name=${artist}&track_name=${title}&album_name=${album}&duration=${duration}`;
+    let response = await fetch(url, {
+      headers: { 'User-Agent': 'SpotifyCloneApp/1.0 (https://github.com/yourrepo)' }
+    });
+
+    // If not found, try without album/duration (looser search)
+    if (!response.ok || response.status === 404) {
+      url = `https://lrclib.net/api/search?artist_name=${artist}&track_name=${title}`;
+      response = await fetch(url, {
+        headers: { 'User-Agent': 'SpotifyCloneApp/1.0 (https://github.com/yourrepo)' }
+      });
+
+      if (response.ok) {
+        const results = await response.json();
+        if (!results || results.length === 0) {
+          return res.json({ success: false, message: 'Lyrics not found for this song' });
+        }
+        // Use first result
+        const best = results[0];
+        return sendLyricsResponse(res, best);
+      }
+
+      return res.json({ success: false, message: 'Lyrics not found for this song' });
+    }
+
+    const data = await response.json();
+    return sendLyricsResponse(res, data);
+
+  } catch (error) {
+    console.error('Get lyrics error:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch lyrics', error: error.message });
+  }
+};
+
+/**
+ * Formats the lrclib response and sends it to the client.
+ * Prefers synced lyrics (LRC) over plain lyrics.
+ */
+function sendLyricsResponse(res, data) {
+  // lrclib returns: { syncedLyrics: "[00:12.34] line...", plainLyrics: "line\nline..." }
+  if (data.syncedLyrics) {
+    const lines = parseLRC(data.syncedLyrics);
+    if (lines.length > 0) {
+      return res.json({
+        success: true,
+        data: { synced: true, lines }
+      });
+    }
+  }
+
+  // Fallback to plain lyrics
+  if (data.plainLyrics) {
+    const lines = data.plainLyrics
+      .split('\n')
+      .filter(l => l.trim() !== '')
+      .map(text => ({ time: null, text }));
+    return res.json({
+      success: true,
+      data: { synced: false, lines }
+    });
+  }
+
+  return res.json({ success: false, message: 'Lyrics not available for this song' });
+}
+
+/**
+ * Parses LRC format string into array of { time: ms, text: string }
+ * LRC format: [mm:ss.xx] lyric text
+ */
+function parseLRC(lrc) {
+  const lines = [];
+  const regex = /\[(\d{2}):(\d{2})\.(\d{2,3})\](.*)/g;
+  let match;
+  while ((match = regex.exec(lrc)) !== null) {
+    const minutes      = parseInt(match[1]);
+    const seconds      = parseInt(match[2]);
+    const centiseconds = parseInt(match[3]);
+    const timeMs       = (minutes * 60 + seconds) * 1000 + centiseconds * 10;
+    const text         = match[4].trim();
+    if (text) lines.push({ time: timeMs, text });
+  }
+  return lines;
+}

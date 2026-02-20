@@ -9,6 +9,7 @@ import {
   getTrendingSongs,
   getSongsByGenre,
   deleteSong,
+  getSongLyrics,        // ← add this import
 } from '../controllers/songController.js';
 import { protect, admin } from '../middleware/authMiddleware.js';
 import { uploadSong as uploadMiddleware, handleUploadError } from '../middleware/uploadMiddleware.js';
@@ -21,6 +22,7 @@ router.get('/search', searchSongs);
 router.get('/trending', getTrendingSongs);
 router.get('/genre/:genre', getSongsByGenre);
 router.get('/:id', getSongById);
+router.get('/:id/lyrics', getSongLyrics);   // ← new lyrics endpoint
 
 // Protected routes
 router.post('/upload', protect, admin, uploadMiddleware, handleUploadError, uploadSong);
